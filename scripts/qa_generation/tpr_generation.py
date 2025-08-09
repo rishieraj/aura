@@ -1,51 +1,26 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Generate THREE "Pitch/Timbre Reasoning" MCQs for every caption file,
-using GPT-4o, and save them to a JSONL file.
-
-This script uses an advanced prompting strategy that instructs the model on how
-to handle potentially conflicting captions and generate high-quality,
-caption-agnostic reasoning that specifically probes pitch and timbre.
-"""
-
-# ─── Imports ────────────────────────────────────────────────────────────────
 import json
 import os
 import sys
 import time
 import re
+import argparse
 from pathlib import Path
 from typing import Dict, Any, List
 from tqdm import tqdm
 import openai
 import backoff
 
-# ─── Configuration ──────────────────────────────────────────────────────────
-# --- Input Directories ---
-BASE_DATA_DIR = Path("pitch_timbre_data")
-VIS_CAPTIONS_DIR = BASE_DATA_DIR / "visual_captions"
-AUD_CAPTIONS_DIR = BASE_DATA_DIR / "audio_captions"
+DEFAULT_CONFIG = {
+    "data_dir": "pitch_timbre_data",
+    "output_dir": "questions",
+    "model": "gpt-4o",
+    "temperature": 0.5,
+    "pause": 1.2
+}
 
-# --- Output Configuration ---
-OUTPUT_DIR = BASE_DATA_DIR / "questions"
-OUTPUT_FILENAME = "qa_pairs.jsonl"
-
-# --- API & Script Configuration ---
 CATEGORY = "pitch_timbre_reasoning"
-MODEL_NAME = "gpt-4o"
-TEMPERATURE = 0.5
 MAX_RETRIES = 5
-PAUSE = 1.2
 
-# ─── OpenAI Client Initialization ───────────────────────────────────────────
-try:
-    client = openai.Client()
-except openai.OpenAIError:
-    print("❌ Error: Please set the OPENAI_API_KEY environment variable.")
-    sys.exit(1)
-
-# ─── Meticulous Prompt for Pitch/Timbre Reasoning ───────────────────────────
 SYSTEM_PROMPT = """
 You are an expert AI Benchmark Designer creating highly specific questions for the "Pitch/Timbre Reasoning" category. Your task is to generate questions that test a model's ability to connect a fine-grained, **comparative** auditory quality (pitch or timbre) with a precise visual detail.
 
@@ -125,14 +100,13 @@ Audio-only Captions:
 Generate THREE distinct MCQs that satisfy all rules for the "Pitch/Timbre Reasoning" category, returning them in a single JSON list.
 """
 
-# ─── Helper Functions ─────────────────────────────────────────────────────
 def read_text(p: Path) -> str:
     """Safely read a text file, returning its content or an empty string."""
     if p and p.exists():
         try:
             return p.read_text(encoding="utf-8").strip()
         except Exception as e:
-            tqdm.write(f"⚠️  Could not read {p}: {e}")
+            tqdm.write(f"Could not read {p}: {e}")
     return ""
 
 def clean_json_str(txt: str) -> str:
@@ -143,16 +117,15 @@ def clean_json_str(txt: str) -> str:
     return txt
 
 @backoff.on_exception(backoff.expo, openai.RateLimitError, max_tries=MAX_RETRIES)
-def gpt_call(system: str, user: str) -> str:
+def gpt_call(client, model: str, temp: float, system: str, user: str) -> str:
     """Make a robust API call with backoff for rate limiting."""
     resp = client.chat.completions.create(
-        model=MODEL_NAME,
-        temperature=TEMPERATURE,
+        model=model,
+        temperature=temp,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user}
         ],
-        # response_format={"type": "json_object"}
     )
     return resp.choices[0].message.content
 
@@ -164,28 +137,103 @@ def validate_item(item: Dict[str, Any], vid: str):
     item["video_id"] = vid
     item["category"] = CATEGORY
 
-# ─── Main Execution Loop ──────────────────────────────────────────────────
-def main():
-    """
-    Main function to orchestrate the QA generation process.
-    """
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = OUTPUT_DIR / OUTPUT_FILENAME
-
-    vis_files = sorted(VIS_CAPTIONS_DIR.glob("*.txt"))
-    if not vis_files:
-        print(f"❌ No visual caption files found in {VIS_CAPTIONS_DIR}")
-        return
-
-    # Load already processed video IDs to avoid duplicate work.
+def get_processed_ids(output_path: Path, resume: bool) -> set:
+    """Get IDs that have already been processed."""
     done_ids = set()
-    if output_path.exists():
+    if output_path.exists() and resume:
         with output_path.open(encoding="utf-8") as f:
             for line in f:
                 try:
                     done_ids.add(json.loads(line)["video_id"])
                 except (json.JSONDecodeError, KeyError):
                     pass
+    return done_ids
+
+def main():
+    # Parse arguments
+    parser = argparse.ArgumentParser(
+        description="Generate Pitch/Timbre Reasoning MCQs using GPT-4o",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        default=DEFAULT_CONFIG["data_dir"],
+        help=f"Path to data directory (default: {DEFAULT_CONFIG['data_dir']})"
+    )
+    
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=DEFAULT_CONFIG["output_dir"],
+        help=f"Path to output directory (default: {DEFAULT_CONFIG['output_dir']})"
+    )
+    
+    parser.add_argument(
+        "--api-key",
+        type=str,
+        help="OpenAI API key (can also use OPENAI_API_KEY env variable)"
+    )
+    
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=DEFAULT_CONFIG["model"],
+        help=f"GPT model to use (default: {DEFAULT_CONFIG['model']})"
+    )
+    
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=DEFAULT_CONFIG["temperature"],
+        help=f"Temperature for GPT (default: {DEFAULT_CONFIG['temperature']})"
+    )
+    
+    parser.add_argument(
+        "--pause",
+        type=float,
+        default=DEFAULT_CONFIG["pause"],
+        help=f"Seconds to pause between API calls (default: {DEFAULT_CONFIG['pause']})"
+    )
+    
+    parser.add_argument(
+        "--no-resume",
+        action="store_false",
+        dest="resume",
+        help="Start fresh, don't resume from previous run"
+    )
+    
+    args = parser.parse_args()
+    
+    # Setup directories
+    base_data_dir = Path(args.data_dir)
+    vis_captions_dir = base_data_dir / "visual_captions"
+    aud_captions_dir = base_data_dir / "audio_captions"
+    output_dir = Path(args.output_dir)
+    
+    # Initialize OpenAI client
+    api_key = args.api_key or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        print("Error: Please set the OPENAI_API_KEY environment variable or use --api-key")
+        sys.exit(1)
+    
+    try:
+        client = openai.Client(api_key=api_key)
+    except openai.OpenAIError as e:
+        print(f"Error initializing OpenAI client: {e}")
+        sys.exit(1)
+    
+    # Main processing
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "qa_pairs.jsonl"
+
+    vis_files = sorted(vis_captions_dir.glob("*.txt"))
+    if not vis_files:
+        print(f"No visual caption files found in {vis_captions_dir}")
+        return
+
+    done_ids = get_processed_ids(output_path, args.resume)
     if done_ids:
         print(f"Found {len(done_ids)} already processed IDs. Skipping them.")
 
@@ -195,9 +243,9 @@ def main():
         for vis_fp in tqdm(files_to_process, desc="Generating QA pairs", unit="clip"):
             vid = vis_fp.stem
 
-            audio_fp = AUD_CAPTIONS_DIR / f"{vid}.txt"
+            audio_fp = aud_captions_dir / f"{vid}.txt"
             if not audio_fp.exists():
-                tqdm.write(f"⚠️  Missing audio caption for {vid}; skipping.")
+                tqdm.write(f"Missing audio caption for {vid}; skipping.")
                 continue
 
             visual_text = read_text(vis_fp)
@@ -208,12 +256,13 @@ def main():
             )
 
             try:
-                raw_response = gpt_call(SYSTEM_PROMPT, user_prompt)
+                raw_response = gpt_call(client, args.model, args.temperature, 
+                                      SYSTEM_PROMPT, user_prompt)
                 items = json.loads(clean_json_str(raw_response))
                 if not isinstance(items, list) or len(items) != 3:
                     raise ValueError(f"Expected a list of 3 items, but got {len(items)}.")
             except Exception as e:
-                tqdm.write(f"❌  ERROR for {vid} (API/Parse): {e}")
+                tqdm.write(f"ERROR for {vid} (API/Parse): {e}")
                 continue
 
             try:
@@ -221,13 +270,13 @@ def main():
                     validate_item(item, vid)
                     out_f.write(json.dumps(item, ensure_ascii=False) + "\n")
                 out_f.flush()
-                tqdm.write(f"✅  Successfully generated 3 QAs for {vid}")
+                tqdm.write(f"Successfully generated 3 QAs for {vid}")
             except Exception as e:
-                tqdm.write(f"❌  ERROR for {vid} (Validation): {e}")
+                tqdm.write(f"ERROR for {vid} (Validation): {e}")
             
-            time.sleep(PAUSE)
+            time.sleep(args.pause)
 
-    print(f"\n✅  Processing complete. Questions appended to {output_path.resolve()}")
+    print(f"\nProcessing complete. Questions appended to {output_path.resolve()}")
 
 if __name__ == "__main__":
     main()

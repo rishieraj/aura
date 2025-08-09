@@ -1,45 +1,26 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Generate "Tempo/AV Synchronization Analysis" QA pairs with varied questions.
-
-This script processes clips from both 'aligned_clips' and 'misaligned_clips'
-and uses a sophisticated prompt to generate diverse, context-aware questions
-that test a model's ability to detect audio-visual synchronization.
-"""
-
-# ─── Imports ────────────────────────────────────────────────────────────────
 import os
 import json
 import random
 import time
+import argparse
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from tqdm import tqdm
 import openai
 import backoff
 
-# ─── Config ────────────────────────────────────────────────────────────────
-# --- Input Directories ---
-BASE_INPUT_DIR = Path("tempo_sync_data")
+DEFAULT_CONFIG = {
+    "data_dir": "tempo_sync_data",
+    "output_dir": "questions",
+    "model": "gpt-4o",
+    "temperature": 0.7,
+    "sleep_between": 0.2,
+    "timeout": 120
+}
 
-ALIGNED_VIS_CAP_DIR = BASE_INPUT_DIR / "aligned_clips" / "visual_captions"
-ALIGNED_AUD_CAP_DIR = BASE_INPUT_DIR / "aligned_clips" / "audio_captions"
-
-MISALIGNED_VIS_CAP_DIR = BASE_INPUT_DIR / "misaligned_clips" / "visual_captions"
-MISALIGNED_AUD_CAP_DIR = BASE_INPUT_DIR / "misaligned_clips" / "audio_captions"
-
-# --- Output Configuration ---
 QUESTION_CATEGORY = "tempo_av_sync_analysis"
-OUTPUT_DIR = BASE_INPUT_DIR / "questions"
-
-# --- GPT-4o API Settings ---
-MODEL_NAME = "gpt-4o"
-REQUEST_TIMEOUT = 120
 MAX_RETRIES = 3
-SLEEP_BETWEEN_JOBS = 0.2  # seconds
 
-# ─── Meticulous Prompt for Varied Synchronization Analysis ──────────────────
 SYSTEM_PROMPT = """
 You are an expert AI Benchmark Designer creating varied and context-aware questions for the "Tempo/AV Synchronization Analysis" category. Your task is to generate a multiple-choice question that tests a model's ability to determine if a video's audio track is synchronized with its visual elements, using specific details from the scene.
 
@@ -115,7 +96,6 @@ Ground Truth Sync Status:
 Generate one MCQ that satisfies all rules for the "Tempo/AV Synchronization Analysis" category.
 """.strip()
 
-# ─── Helpers ────────────────────────────────────────────────────────────────
 def shuffle_qa_options(qa: Dict[str, Any]) -> Dict[str, Any]:
     """Shuffle answer options so the correct key isn't always the same."""
     try:
@@ -134,7 +114,7 @@ def shuffle_qa_options(qa: Dict[str, Any]) -> Dict[str, Any]:
         qa["options"] = new_opts
         qa["correct_answer_key"] = new_key
     except Exception as e:
-        tqdm.write(f"⚠️  Shuffle error: {e}; leaving options unchanged.")
+        tqdm.write(f"Shuffle error: {e}; leaving options unchanged.")
     return qa
 
 def read_text(fp: Path) -> str:
@@ -145,59 +125,148 @@ def read_text(fp: Path) -> str:
         return ""
 
 @backoff.on_exception(backoff.expo, openai.RateLimitError, max_tries=MAX_RETRIES)
-def gpt4o_request(client: openai.Client, visual: str, audio: str, sync_status: str) -> Optional[Dict[str, Any]]:
+def gpt4o_request(client: openai.Client, model: str, temp: float, timeout: int, 
+                  visual: str, audio: str, sync_status: str) -> Optional[Dict[str, Any]]:
     """Call GPT-4o with retries; return parsed JSON or None."""
     content = USER_PROMPT_TEMPLATE.format(visual=visual, audio=audio, sync_status=sync_status)
     resp = client.chat.completions.create(
-        model=MODEL_NAME,
+        model=model,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": content},
         ],
-        temperature=0.7, # Increased temperature for more variety
+        temperature=temp,
         max_tokens=800,
         response_format={"type": "json_object"},
-        timeout=REQUEST_TIMEOUT,
+        timeout=timeout,
     )
     return json.loads(resp.choices[0].message.content)
 
-# ─── Main ────────────────────────────────────────────────────────────────────
-def main() -> None:
-    if not os.getenv("OPENAI_API_KEY"):
-        print("❌  OPENAI_API_KEY environment variable not set.")
-        return
-    client = openai.Client()
+def get_processed_ids(output_path: Path, resume: bool) -> set:
+    """Get IDs that have already been processed."""
+    done_ids = set()
+    if output_path.exists() and resume:
+        with output_path.open(encoding="utf-8") as f:
+            for line in f:
+                try:
+                    done_ids.add(json.loads(line)["video_id"])
+                except (json.JSONDecodeError, KeyError):
+                    pass
+    return done_ids
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"📂 Output will be saved to: {OUTPUT_DIR.resolve()}")
+def main() -> None:
+    # Parse arguments
+    parser = argparse.ArgumentParser(
+        description="Generate Tempo/AV Synchronization Analysis QA pairs using GPT-4o",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        default=DEFAULT_CONFIG["data_dir"],
+        help=f"Path to data directory (default: {DEFAULT_CONFIG['data_dir']})"
+    )
+    
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=DEFAULT_CONFIG["output_dir"],
+        help=f"Path to output directory (default: {DEFAULT_CONFIG['output_dir']})"
+    )
+    
+    parser.add_argument(
+        "--api-key",
+        type=str,
+        help="OpenAI API key (can also use OPENAI_API_KEY env variable)"
+    )
+    
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=DEFAULT_CONFIG["model"],
+        help=f"GPT model to use (default: {DEFAULT_CONFIG['model']})"
+    )
+    
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=DEFAULT_CONFIG["temperature"],
+        help=f"Temperature for GPT (default: {DEFAULT_CONFIG['temperature']})"
+    )
+    
+    parser.add_argument(
+        "--sleep-between",
+        type=float,
+        default=DEFAULT_CONFIG["sleep_between"],
+        help=f"Seconds to sleep between API calls (default: {DEFAULT_CONFIG['sleep_between']})"
+    )
+    
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=DEFAULT_CONFIG["timeout"],
+        help=f"Request timeout in seconds (default: {DEFAULT_CONFIG['timeout']})"
+    )
+    
+    parser.add_argument(
+        "--no-resume",
+        action="store_false",
+        dest="resume",
+        help="Start fresh, don't resume from previous run"
+    )
+    
+    args = parser.parse_args()
+    
+    # Setup directories
+    base_input_dir = Path(args.data_dir)
+    aligned_vis_cap_dir = base_input_dir / "aligned_clips" / "visual_captions"
+    aligned_aud_cap_dir = base_input_dir / "aligned_clips" / "audio_captions"
+    misaligned_vis_cap_dir = base_input_dir / "misaligned_clips" / "visual_captions"
+    misaligned_aud_cap_dir = base_input_dir / "misaligned_clips" / "audio_captions"
+    output_dir = Path(args.output_dir)
+    
+    # Initialize OpenAI client
+    api_key = args.api_key or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        print("OPENAI_API_KEY environment variable not set or use --api-key")
+        return
+    
+    client = openai.Client(api_key=api_key)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Output will be saved to: {output_dir.resolve()}")
 
     # --- 1. Gather all files to process ---
     files_to_process: List[Dict[str, Any]] = []
     
     # Gather aligned files
-    if ALIGNED_VIS_CAP_DIR.is_dir():
-        for vis_fp in ALIGNED_VIS_CAP_DIR.glob("*.txt"):
-            aud_fp = ALIGNED_AUD_CAP_DIR / vis_fp.name
+    if aligned_vis_cap_dir.is_dir():
+        for vis_fp in aligned_vis_cap_dir.glob("*.txt"):
+            aud_fp = aligned_aud_cap_dir / vis_fp.name
             if aud_fp.exists():
                 files_to_process.append({"vis_path": vis_fp, "aud_path": aud_fp, "is_aligned": True})
 
     # Gather misaligned files
-    if MISALIGNED_VIS_CAP_DIR.is_dir():
-        for vis_fp in MISALIGNED_VIS_CAP_DIR.glob("*.txt"):
-            aud_fp = MISALIGNED_AUD_CAP_DIR / vis_fp.name
+    if misaligned_vis_cap_dir.is_dir():
+        for vis_fp in misaligned_vis_cap_dir.glob("*.txt"):
+            aud_fp = misaligned_aud_cap_dir / vis_fp.name
             if aud_fp.exists():
                 files_to_process.append({"vis_path": vis_fp, "aud_path": aud_fp, "is_aligned": False})
             
     if not files_to_process:
-        print("❌ Error: No caption file pairs found. Check your directory structure.")
-        print(f"   - Looked in: {ALIGNED_VIS_CAP_DIR} & {ALIGNED_AUD_CAP_DIR}")
-        print(f"   - Looked in: {MISALIGNED_VIS_CAP_DIR} & {MISALIGNED_AUD_CAP_DIR}")
+        print("Error: No caption file pairs found. Check your directory structure.")
         return
 
     random.shuffle(files_to_process) # Shuffle to mix aligned/misaligned
+    
+    # Get processed IDs if resuming
+    output_path = output_dir / "qa_pairs.jsonl"
+    done_ids = get_processed_ids(output_path, args.resume)
+    if done_ids:
+        print(f"Found {len(done_ids)} already processed IDs. Skipping them.")
+        files_to_process = [f for f in files_to_process if f["vis_path"].stem not in done_ids]
 
-    # --- 2. Generate QA pairs ---
-    output_path = OUTPUT_DIR / "qa_pairs.jsonl"
     with output_path.open("a", encoding="utf-8") as f:
         for item in tqdm(files_to_process, desc="Generating QA pairs", unit="clip"):
             vis_fp = item["vis_path"]
@@ -208,25 +277,26 @@ def main() -> None:
             visual_caption = read_text(vis_fp)
             audio_caption = read_text(aud_fp)
             if not (visual_caption and audio_caption):
-                tqdm.write(f"⚠️  Empty caption for {video_id}; skipping.")
+                tqdm.write(f"Empty caption for {video_id}; skipping.")
                 continue
             
             try:
-                qa = gpt4o_request(client, visual_caption, audio_caption, sync_status)
+                qa = gpt4o_request(client, args.model, args.temperature, args.timeout,
+                                 visual_caption, audio_caption, sync_status)
                 if qa:
                     qa = shuffle_qa_options(qa)
                     qa.update({"video_id": video_id, "category": QUESTION_CATEGORY, "sync_status": sync_status})
                     f.write(json.dumps(qa, ensure_ascii=False) + "\n")
                     f.flush()
-                    tqdm.write(f"✅  QA for {video_id} (Status: {sync_status})")
+                    tqdm.write(f"QA for {video_id} (Status: {sync_status})")
                 else:
-                    tqdm.write(f"❌  Failed on {video_id} after retries.")
+                    tqdm.write(f"Failed on {video_id} after retries.")
             except Exception as e:
-                 tqdm.write(f"❌  Failed on {video_id} with error: {e}")
+                 tqdm.write(f"Failed on {video_id} with error: {e}")
 
-            time.sleep(SLEEP_BETWEEN_JOBS)
+            time.sleep(args.sleep_between)
 
-    print(f"\n🎉  Finished. QA pairs were saved or appended to {output_path.resolve()}")
+    print(f"\nFinished. QA pairs were saved or appended to {output_path.resolve()}")
 
 if __name__ == "__main__":
     main()

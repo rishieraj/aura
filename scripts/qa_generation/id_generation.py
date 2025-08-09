@@ -1,35 +1,19 @@
-#!/usr/bin/env python3
-"""
-Generate two implicit-misunderstanding MCQs per caption file
-using GPT-4o.  Output → implicit_questions.jsonl
-"""
-
-# ===== OpenAI Client =====
-import openai, csv, re, json, sys, time, backoff
+import openai, csv, re, json, sys, time, backoff, argparse
 from pathlib import Path
 from typing import Dict, Any
 from tqdm import tqdm
 
-try:
-    client = openai.Client()
-except openai.OpenAIError:
-    print("❌  OPENAI_API_KEY not set.")
-    sys.exit(1)
+DEFAULT_CONFIG = {
+    "data_dir": "implicit_distractions_data",
+    "output_file": "implicit_questions.jsonl",
+    "model": "gpt-4o",
+    "temperature": 0.4,
+    "sleep_between": 1.5
+}
 
-# ----------------------------------------------------------------------
-# CONFIG (paths are relative; change as needed)
-# ----------------------------------------------------------------------
-ORDER_CSV    = Path("implicit_misunderstanding_data/order_log.csv")
-OUT_PATH     = Path("implicit_questions.jsonl")
+MAX_RETRIES = 5
 
-MODEL_NAME   = "gpt-4o"
-TEMPERATURE  = 0.4
-MAX_RETRIES  = 5
-SLEEP_BETWEEN= 1.5
-# ----------------------------------------------------------------------
-
-# ===== Prompt template =====
-SYS_PROMPT = """You are an expert AI Benchmark Designer specializing in creating challenging multiple-choice questions. Your task is to test a model's ability to handle specific spatial references and avoid "implicit misunderstandings" or attentional errors.
+SYS_PROMPT = """You are an expert AI Benchmark Designer specializing in creating challenging multiple-choice questions. Your task is to test a model's ability to handle specific spatial references and avoid "implicit distractions" or attentional errors.
 
 You will receive separate **Visual** and **Audio** captions for two different clips that have been stitched together into a single video, one in the top half and one in the bottom half. A key "target" object or performer (e.g., a guitarist) often appears in **both** halves of the video.
 
@@ -72,7 +56,7 @@ The goal is to craft questions that force a model to correctly ground its answer
     "correct_answer_key": "A",
     "gold_reasoning": "The answer is in the top half. The caption states the guitarist in the top half is next to a woman on a red couch. The 'brick wall' is a hallucination trap from the bottom half.",
     "video_id": "placeholder_id",
-    "category": "implicit misunderstanding"
+    "category": "implicit distractions"
   },
   {
     "question": "What kind of hair does the guitarist in the bottom half have?",
@@ -85,7 +69,7 @@ The goal is to craft questions that force a model to correctly ground its answer
     "correct_answer_key": "C",
     "gold_reasoning": "The answer is in the bottom half. The caption specifies the guitarist in the bottom half has short hair. 'Curly hair and a beard' is a hallucination trap from the top half.",
     "video_id": "placeholder_id",
-    "category": "implicit misunderstanding"
+    "category": "implicit distractions"
   }
 ]
 ```
@@ -108,7 +92,7 @@ The goal is to craft questions that force a model to correctly ground its answer
     "correct_answer_key": "B",
     "gold_reasoning": "The answer is in the top half. The caption describes the violinist in the concert hall (top) as wearing a formal black suit. The 'casual blue t-shirt' is a trap from the bottom half.",
     "video_id": "placeholder_id",
-    "category": "implicit misunderstanding"
+    "category": "implicit distractions"
   },
   {
     "question": "What is the setting for the violinist shown in the bottom frame?",
@@ -121,7 +105,7 @@ The goal is to craft questions that force a model to correctly ground its answer
     "correct_answer_key": "C",
     "gold_reasoning": "The answer is in the bottom half. The caption specifies the setting for the violinist in the bottom frame is a park. The 'grand concert hall' is a trap from the top half.",
     "video_id": "placeholder_id",
-    "category": "implicit misunderstanding"
+    "category": "implicit distractions"
   }
 ]
 ```
@@ -144,7 +128,7 @@ The goal is to craft questions that force a model to correctly ground its answer
     "correct_answer_key": "B",
     "gold_reasoning": "The answer is in the top half. The caption states the choir in the top half is accompanied by violinists. The 'piano' is a hallucination trap from the bottom half.",
     "video_id": "placeholder_id",
-    "category": "implicit misunderstanding"
+    "category": "implicit distractions"
   },
   {
     "question": "What color are the robes worn by the choir that is accompanied by a pianist?",
@@ -157,7 +141,7 @@ The goal is to craft questions that force a model to correctly ground its answer
     "correct_answer_key": "C",
     "gold_reasoning": "The answer is in the bottom half. The caption specifies the choir accompanied by the pianist is wearing white robes. 'Black' robes are a hallucination trap from the top half.",
     "video_id": "placeholder_id",
-    "category": "implicit misunderstanding"
+    "category": "implicit distractions"
   }
 ]
 ```
@@ -181,17 +165,16 @@ Audio:
 Generate TWO MCQs now following all rules.
 """
 
-# ----- utils ----------------------------------------------------------
 def normalise(txt:str)->str:
     txt=re.sub(r"```(?:json)?|```","",txt).strip()
-    txt=re.sub(r",\s*}","}",txt); txt=re.sub(r",\s*]","}",txt)
+    txt=re.sub(r",\s*}","}",txt); txt=re.sub(r",\s*]","]",txt)
     return txt
 
 @backoff.on_exception(backoff.expo, openai.OpenAIError, max_tries=MAX_RETRIES)
-def gpt(system:str,user:str)->str:
+def gpt(client, model:str, temp:float, system:str, user:str)->str:
     r = client.chat.completions.create(
-        model       = MODEL_NAME,
-        temperature = TEMPERATURE,
+        model       = model,
+        temperature = temp,
         messages = [
             {"role": "system", "content": system},
             {"role": "user",   "content": user}
@@ -204,67 +187,149 @@ def validate(item:Dict[str,Any],vid:str):
          "video_id","category"}
     if not req.issubset(item): raise ValueError(f"keys {req-item.keys()}")
     item["video_id"]=vid
-    item["category"]="implicit_misunderstanding"
-
-# ----- load CSV -------------------------------------------------------
-rows=[]
-with open(ORDER_CSV,newline='',encoding='utf-8') as f:
-    reader=csv.DictReader(f)
-    for r in reader:
-        rows.append(r)
-
-if not rows:
-    print(f"No rows in {ORDER_CSV}"); sys.exit()
-
-# keys detection (expects these column names)
-VIS_TOP_KEY  = next(k for k in rows[0] if "top_visual"  in k.lower())
-AUD_TOP_KEY  = next(k for k in rows[0] if "top_audio"   in k.lower())
-VIS_BOT_KEY  = next(k for k in rows[0] if "bottom_visual" in k.lower())
-AUD_BOT_KEY  = next(k for k in rows[0] if "bottom_audio"  in k.lower())
-VID_KEY      = next(k for k in rows[0] if "video_name" in k.lower())
+    item["category"]="implicit_distractions"
 
 def read_txt(p:str)->str:
     try:  return Path(p).read_text(encoding='utf-8').strip()
     except: return ""
 
-# ----- skip already‑done vids ----------------------------------------
-done=set()
-if OUT_PATH.exists():
-    with open(OUT_PATH,encoding='utf-8') as f:
-        for ln in f:
-            try: done.add(json.loads(ln)["video_id"])
-            except: pass
+def get_processed_ids(output_path: Path, resume: bool) -> set:
+    """Get IDs that have already been processed."""
+    done = set()
+    if output_path.exists() and resume:
+        with open(output_path, encoding='utf-8') as f:
+            for ln in f:
+                try: done.add(json.loads(ln)["video_id"])
+                except: pass
+    return done
 
-print(f"{len(done)} already processed; skipping.")
+def main():
+    # Parse arguments
+    parser = argparse.ArgumentParser(
+        description="Generate Implicit Distractions MCQs using GPT-4o",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        default=DEFAULT_CONFIG["data_dir"],
+        help=f"Path to data directory (default: {DEFAULT_CONFIG['data_dir']})"
+    )
+    
+    parser.add_argument(
+        "--output-file",
+        type=str,
+        default=DEFAULT_CONFIG["output_file"],
+        help=f"Output filename (default: {DEFAULT_CONFIG['output_file']})"
+    )
+    
+    parser.add_argument(
+        "--api-key",
+        type=str,
+        help="OpenAI API key (can also use OPENAI_API_KEY env variable)"
+    )
+    
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=DEFAULT_CONFIG["model"],
+        help=f"GPT model to use (default: {DEFAULT_CONFIG['model']})"
+    )
+    
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=DEFAULT_CONFIG["temperature"],
+        help=f"Temperature for GPT (default: {DEFAULT_CONFIG['temperature']})"
+    )
+    
+    parser.add_argument(
+        "--sleep-between",
+        type=float,
+        default=DEFAULT_CONFIG["sleep_between"],
+        help=f"Seconds to sleep between API calls (default: {DEFAULT_CONFIG['sleep_between']})"
+    )
+    
+    parser.add_argument(
+        "--no-resume",
+        action="store_false",
+        dest="resume",
+        help="Start fresh, don't resume from previous run"
+    )
+    
+    args = parser.parse_args()
+    
+    # Setup paths
+    order_csv = Path(args.data_dir) / "order_log.csv"
+    out_path = Path(args.output_file)
+    
+    # Initialize OpenAI client
+    import os
+    api_key = args.api_key or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        print("OPENAI_API_KEY not set or use --api-key")
+        sys.exit(1)
+        
+    try:
+        client = openai.Client(api_key=api_key)
+    except openai.OpenAIError as e:
+        print(f"OpenAI client error: {e}")
+        sys.exit(1)
+    
+    # ----- load CSV -------------------------------------------------------
+    rows=[]
+    with open(order_csv,newline='',encoding='utf-8') as f:
+        reader=csv.DictReader(f)
+        for r in reader:
+            rows.append(r)
+    
+    if not rows:
+        print(f"No rows in {order_csv}"); sys.exit()
+    
+    # keys detection (expects these column names)
+    VIS_TOP_KEY  = next(k for k in rows[0] if "top_visual"  in k.lower())
+    AUD_TOP_KEY  = next(k for k in rows[0] if "top_audio"   in k.lower())
+    VIS_BOT_KEY  = next(k for k in rows[0] if "bottom_visual" in k.lower())
+    AUD_BOT_KEY  = next(k for k in rows[0] if "bottom_audio"  in k.lower())
+    VID_KEY      = next(k for k in rows[0] if "video_name" in k.lower())
+    
+    # ----- skip already‑done vids ----------------------------------------
+    done = get_processed_ids(out_path, args.resume)
+    if done:
+        print(f"{len(done)} already processed; skipping.")
+    
+    with open(out_path,"a",encoding="utf-8") as fout:
+        for r in tqdm(rows,desc="Generating QA pairs",unit="clip"):
+            vid=r[VID_KEY]
+            if vid in done: continue
+    
+            top_vis=read_txt(r[VIS_TOP_KEY]);  bot_vis=read_txt(r[VIS_BOT_KEY])
+            top_aud=read_txt(r[AUD_TOP_KEY]);  bot_aud=read_txt(r[AUD_BOT_KEY])
+    
+            prompt=USER_PROMPT_TMPL.format(
+                vid=vid, top_vis=top_vis, top_aud=top_aud,
+                bot_vis=bot_vis, bot_aud=bot_aud)
+    
+            try:
+                raw=gpt(client, args.model, args.temperature, SYS_PROMPT, prompt)
+                items=json.loads(normalise(raw))
+                if not isinstance(items,list) or len(items)!=2:
+                    raise ValueError("expected list len=2")
+            except Exception as e:
+                tqdm.write(f"ERROR for {vid} (API/Parse): {e}")
+                continue
+    
+            try:
+                for it in items:
+                    validate(it,vid)
+                    fout.write(json.dumps(it,ensure_ascii=False)+"\n")
+                fout.flush()
+                time.sleep(args.sleep_between)
+            except Exception as e:
+                tqdm.write(f"{vid}: validation error {e}")
+    
+    print(f"\nAll questions appended to {out_path}")
 
-with open(OUT_PATH,"a",encoding="utf-8") as fout:
-    for r in tqdm(rows,desc="Generating QA pairs",unit="clip"):
-        vid=r[VID_KEY]
-        if vid in done: continue
-
-        top_vis=read_txt(r[VIS_TOP_KEY]);  bot_vis=read_txt(r[VIS_BOT_KEY])
-        top_aud=read_txt(r[AUD_TOP_KEY]);  bot_aud=read_txt(r[AUD_BOT_KEY])
-
-        prompt=USER_PROMPT_TMPL.format(
-            vid=vid, top_vis=top_vis, top_aud=top_aud,
-            bot_vis=bot_vis, bot_aud=bot_aud)
-
-        try:
-            raw=gpt(SYS_PROMPT,prompt)
-            items=json.loads(normalise(raw))
-            if not isinstance(items,list) or len(items)!=2:
-                raise ValueError("expected list len=2")
-        except Exception as e:
-            tqdm.write(f"❌  ERROR for {vid} (API/Parse): {e}")
-            continue
-
-        try:
-            for it in items:
-                validate(it,vid)
-                fout.write(json.dumps(it,ensure_ascii=False)+"\n")
-            fout.flush()
-            time.sleep(SLEEP_BETWEEN)
-        except Exception as e:
-            tqdm.write(f"⚠️  {vid}: validation error {e}")
-
-print(f"\n✅  All questions appended to {OUT_PATH}")
+if __name__ == "__main__":
+    main()

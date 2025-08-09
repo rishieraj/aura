@@ -1,20 +1,10 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Generate TWO "Performer Skill Profiling" MCQs per combined video.
-
-This script uses a sophisticated prompting strategy to handle potentially
-flawed or hallucinated captions. It instructs the model to prioritize a
-ground truth skill order and use visual/audio captions according to a
-strict information hierarchy.
-"""
-
 import csv
 import json
 import os
 import re
 import sys
 import time
+import argparse
 from pathlib import Path
 from typing import Dict, Any, List
 
@@ -22,22 +12,17 @@ import backoff
 import openai
 from tqdm import tqdm
 
-# ─── Repository root ────────────────────────────────────────────────────────
-ROOT_DIR          = Path(__file__).resolve().parent
-BASE_DIR          = ROOT_DIR / "performer_skill_data"
-META_CSV          = BASE_DIR / "order_log.csv"
-OUTPUT_DIR        = BASE_DIR / "questions"
-OUTPUT_FILE       = OUTPUT_DIR / "qa_pairs.jsonl"
+DEFAULT_CONFIG = {
+    "data_dir": "performer_skill_data",
+    "output_dir": "questions",
+    "model": "gpt-4o",
+    "temperature": 0.6,
+    "pause": 1.2
+}
 
-# ─── OpenAI parameters ──────────────────────────────────────────────────────
-MODEL_NAME        = "gpt-4o"
-TEMP              = 0.6
-MAX_RETRIES       = 5
-PAUSE             = 1.2
+MAX_RETRIES = 5
+CATEGORY = "performer_skill_profiling"
 
-CATEGORY          = "performer_skill_profiling"
-
-# ─── System & user prompts ──────────────────────────────────────────────────
 SYSTEM_PROMPT = """
 You are an expert AI Benchmark Designer creating questions for the "Performer Skill Profiling" category. Your task is to generate questions that test a model's ability to differentiate between novice and expert performers by reasoning over conflicting and imperfect information sources.
 
@@ -122,19 +107,11 @@ Ground Truth Order:
 Generate TWO distinct MCQs that satisfy all rules for the "Performer Skill Profiling" category.
 """
 
-# ─── OpenAI client ──────────────────────────────────────────────────────────
-try:
-    client = openai.Client()
-except openai.OpenAIError:
-    print("❌  Set the OPENAI_API_KEY environment variable.")
-    sys.exit(1)
-
-# ─── Helper utilities ───────────────────────────────────────────────────────
 def read_text(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8").strip()
     except Exception as e:
-        tqdm.write(f"⚠️  Could not read {path}: {e}")
+        tqdm.write(f"Could not read {path}: {e}")
         return ""
 
 def clean_json(txt: str) -> str:
@@ -145,13 +122,12 @@ def clean_json(txt: str) -> str:
     return txt
 
 @backoff.on_exception(backoff.expo, openai.RateLimitError, max_tries=MAX_RETRIES)
-def gpt_call(system: str, user: str) -> str:
+def gpt_call(client, model: str, temp: float, system: str, user: str) -> str:
     resp = client.chat.completions.create(
-        model=MODEL_NAME,
-        temperature=TEMP,
+        model=model,
+        temperature=temp,
         messages=[{"role": "system", "content": system},
                   {"role": "user",   "content": user}],
-        # response_format={"type": "json_object"}
     )
     return resp.choices[0].message.content
 
@@ -162,38 +138,119 @@ def validate(item: Dict[str, Any], vid_id: str):
     item["video_id"] = vid_id
     item["category"] = CATEGORY
 
-# ─── Main workflow ──────────────────────────────────────────────────────────
-def main():
-    if not META_CSV.exists():
-        print(f"❌  Metadata CSV not found: {META_CSV}")
-        return
-
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Prevent duplicates if rerun
+def get_processed_ids(output_path: Path, resume: bool) -> set:
+    """Get IDs that have already been processed."""
     finished_ids = set()
-    if OUTPUT_FILE.exists():
-        for ln in OUTPUT_FILE.open(encoding="utf-8"):
+    if output_path.exists() and resume:
+        for ln in output_path.open(encoding="utf-8"):
             try:
                 finished_ids.add(json.loads(ln)["video_id"])
             except Exception:
                 pass
+    return finished_ids
+
+def main():
+    # Parse arguments
+    parser = argparse.ArgumentParser(
+        description="Generate Performer Skill Profiling MCQs using GPT-4o",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        default=DEFAULT_CONFIG["data_dir"],
+        help=f"Path to data directory (default: {DEFAULT_CONFIG['data_dir']})"
+    )
+    
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=DEFAULT_CONFIG["output_dir"],
+        help=f"Path to output directory (default: {DEFAULT_CONFIG['output_dir']})"
+    )
+    
+    parser.add_argument(
+        "--api-key",
+        type=str,
+        help="OpenAI API key (can also use OPENAI_API_KEY env variable)"
+    )
+    
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=DEFAULT_CONFIG["model"],
+        help=f"GPT model to use (default: {DEFAULT_CONFIG['model']})"
+    )
+    
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=DEFAULT_CONFIG["temperature"],
+        help=f"Temperature for GPT (default: {DEFAULT_CONFIG['temperature']})"
+    )
+    
+    parser.add_argument(
+        "--pause",
+        type=float,
+        default=DEFAULT_CONFIG["pause"],
+        help=f"Seconds to pause between API calls (default: {DEFAULT_CONFIG['pause']})"
+    )
+    
+    parser.add_argument(
+        "--no-resume",
+        action="store_false",
+        dest="resume",
+        help="Start fresh, don't resume from previous run"
+    )
+    
+    args = parser.parse_args()
+    
+    # Setup paths
+    root_dir = Path(__file__).resolve().parent
+    base_dir = root_dir / args.data_dir
+    meta_csv = base_dir / "order_log.csv"
+    output_dir = base_dir / args.output_dir
+    output_file = output_dir / "qa_pairs.jsonl"
+    
+    # Initialize OpenAI client
+    api_key = args.api_key or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        print("Set the OPENAI_API_KEY environment variable or use --api-key")
+        sys.exit(1)
+    
+    try:
+        client = openai.Client(api_key=api_key)
+    except openai.OpenAIError as e:
+        print(f"OpenAI client error: {e}")
+        sys.exit(1)
+    
+    if not meta_csv.exists():
+        print(f"Metadata CSV not found: {meta_csv}")
+        return
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Prevent duplicates if rerun
+    finished_ids = get_processed_ids(output_file, args.resume)
+    if finished_ids:
+        print(f"Found {len(finished_ids)} already processed IDs. Skipping them.")
 
     # Read CSV
-    with META_CSV.open(newline="", encoding="utf-8") as csv_f:
+    with meta_csv.open(newline="", encoding="utf-8") as csv_f:
         reader = csv.DictReader(csv_f)
         rows: List[Dict[str, str]] = list(reader)
 
     # Process each row
-    with OUTPUT_FILE.open("a", encoding="utf-8") as out_f:
+    with output_file.open("a", encoding="utf-8") as out_f:
         for row in tqdm(rows, desc="Generating QA pairs", unit="video"):
             vid_stem = Path(row["combined_file"]).stem
             if vid_stem in finished_ids:
                 continue
 
-            # Resolve caption paths against ROOT_DIR
+            # Resolve caption paths against root_dir
             def rel_path(key: str) -> Path:
-                return ROOT_DIR / row[key]
+                return root_dir / row[key]
 
             vis_first   = read_text(rel_path("first_visual_caption"))
             vis_second  = read_text(rel_path("second_visual_caption"))
@@ -201,7 +258,7 @@ def main():
             aud_second  = read_text(rel_path("second_audio_caption"))
 
             if not all([vis_first, vis_second, aud_first, aud_second]):
-                tqdm.write(f"⚠️  Missing one or more caption files for {vid_stem}; skipping.")
+                tqdm.write(f"Missing one or more caption files for {vid_stem}; skipping.")
                 continue
 
             order_str = f"The {row['first_role']} performs first, followed by the {row['second_role']}."
@@ -217,12 +274,13 @@ def main():
 
             # Call OpenAI & parse
             try:
-                raw_resp = gpt_call(SYSTEM_PROMPT, user_prompt)
+                raw_resp = gpt_call(client, args.model, args.temperature, 
+                                  SYSTEM_PROMPT, user_prompt)
                 items = json.loads(clean_json(raw_resp))
                 if not isinstance(items, list) or len(items) != 2:
                     raise ValueError("Expected a list of two QA objects.")
             except Exception as e:
-                tqdm.write(f"❌  API/parse error for {vid_stem}: {e}")
+                tqdm.write(f"API/parse error for {vid_stem}: {e}")
                 continue
 
             # Validate & write
@@ -231,14 +289,13 @@ def main():
                     validate(itm, vid_stem)
                     out_f.write(json.dumps(itm, ensure_ascii=False) + "\n")
                 out_f.flush()
-                tqdm.write(f"✅  Wrote 2 QAs for {vid_stem}")
+                tqdm.write(f"Wrote 2 QAs for {vid_stem}")
             except Exception as e:
-                tqdm.write(f"❌  Validation error for {vid_stem}: {e}")
+                tqdm.write(f"Validation error for {vid_stem}: {e}")
 
-            time.sleep(PAUSE)
+            time.sleep(args.pause)
 
-    print(f"\n🎉  Finished. QAs saved to {OUTPUT_FILE.resolve()}")
+    print(f"\nFinished. QAs saved to {output_file.resolve()}")
 
-# ─── Entry point ────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     main()
