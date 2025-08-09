@@ -20,7 +20,7 @@ _<sup>1</sup> University of Maryland, <sup>2</sup> Adobe Research_
 We present AURA, the first question-answering (QA) benchmark designed to evaluate state-of-the-art Audio-Visual Large Language Models (AV-LLMs) and Omni-Modal Language Models (OLMs) on fine-grained cognitive tasks, including Cross-Modal Causal Reasoning, Timbre/Pitch Reasoning, Tempo/AV Synchronization Analysis, Unanswerability, Implicit Distractions, and Performer Skill Profiling.
 
 <div align="center">
-  📰 <a href="#" style="color: black; text-decoration: underline;text-decoration-style: dotted;">Paper</a>   🗃️  <a href="#" style="color: black; text-decoration: underline;text-decoration-style: dotted;">Dataset</a>   🌐  <a href="#" style="color: black; text-decoration: underline;text-decoration-style: dotted;">Project Page</a>   🧱   <a href="#" style="color: black; text-decoration: underline;text-decoration-style: dotted;">Code</a>   
+  📰 <a href="#" style="color: black; text-decoration: underline;text-decoration-style: dotted;">Paper</a>   🗃️  <a href="https://drive.google.com/drive/folders/1ua93_3XyDAZZ6arGQij7OqAZR3UO5pZW?usp=drive_link" style="color: black; text-decoration: underline;text-decoration-style: dotted;">Dataset</a>   🌐  <a href="https://rishieraj.github.io/aura-project-page/" style="color: black; text-decoration: underline;text-decoration-style: dotted;">Project Page</a>   🧱   <a href="https://github.com/rishieraj/aura.git" style="color: black; text-decoration: underline;text-decoration-style: dotted;">Code</a>
 </div>
 
 
@@ -56,7 +56,7 @@ We present AURA, the first question-answering (QA) benchmark designed to evaluat
 ```
 
 ## Dataset 📁
-Please download the dataset JSONs from here: <a href="#"> Link </a>
+Please download the dataset JSONs from here: <a href="https://drive.google.com/drive/folders/1ua93_3XyDAZZ6arGQij7OqAZR3UO5pZW?usp=drive_link"> Link </a>
   
 
 ## Results 📉
