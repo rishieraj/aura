@@ -72,14 +72,14 @@ Once the captions and transcripts are obtained, please follow the following inst
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/causal-qa-generator.git
-cd causal-qa-generator
+git clone https://github.com/rishieraj/aura.git
+cd aura
 
 # Install dependencies
 pip install -r requirements.txt
 
 # Set your OpenAI API key
-export OPENAI_API_KEY='your-api-key-here'
+export OPENAI_API_KEY='sk-...'
 ```
 
 ### 2. Prepare Your Data
