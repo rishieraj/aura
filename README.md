@@ -107,13 +107,13 @@ causal_reasoning_data/
 
 ```bash
 # Using default settings
-python causal_qa.py
+python cr_generation.py
 
 # With custom data directory
-python causal_qa.py --data-dir ./my_data --output-dir ./my_output
+python cr_generation.py --data-dir ./my_data --output-dir ./my_output
 
 # Using a different model with higher temperature
-python causal_qa.py --model gpt-4o-mini --temp 0.7
+python cr_generation.py --model gpt-4o-mini --temp 0.7
 ```
 
 ### 4. Evaluation
